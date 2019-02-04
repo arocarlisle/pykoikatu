@@ -1,8 +1,4 @@
-*.bak
 *.pickle
-*.png
+*_8300
+*_booru
 __pycache__
-data_*
-out*
-test*
-tmp*
