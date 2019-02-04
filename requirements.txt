@@ -2,3 +2,5 @@ h5py
 hsluv
 numpy
 pillow
+scikit-learn
+scipy

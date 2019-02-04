@@ -19,6 +19,8 @@ import h5py
 import hsluv
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from scipy.special import ndtr
+from sklearn.mixture import GaussianMixture
 
 DEBUG = False
 
@@ -470,24 +472,49 @@ def read_extern_img(filename):
 
 def read_mean_cov(filename):
     with h5py.File(filename, 'r') as f:
-        mean = np.array(f['mean'], dtype=float)
-        cov = np.array(f['cov'], dtype=float)
+        mean = np.array(f['mean'], dtype=np.float64)
+        cov = np.array(f['cov'], dtype=np.float64)
     return mean, cov
 
 
-def generate_params(mean, cov):
+def generate_params_mean_cov(mean, cov, use_cdf=False):
     params = np.random.multivariate_normal(mean, cov)
+    if use_cdf:
+        params = ndtr(params)
+    params = np.clip(params, 0, 1)
+    params = params.tolist()
+    return params
+
+
+def read_gmm(filename):
+    with h5py.File(filename, 'r') as f:
+        weight = np.array(f['weight'], dtype=np.float64)
+        mean = np.array(f['mean'], dtype=np.float64)
+        cov = np.array(f['cov'], dtype=np.float64)
+    return weight, mean, cov
+
+
+def generate_params_gmm(weight, mean, cov, use_cdf=False):
+    gmm = GaussianMixture(n_components=weight.size)
+    gmm.weights_ = weight
+    gmm.means_ = mean
+    gmm.covariances_ = cov
+    # Pass the fit check
+    gmm.precisions_cholesky_ = None
+    params = gmm.sample()[0][0]
+    if use_cdf:
+        params = ndtr(params)
     params = np.clip(params, 0, 1)
     params = params.tolist()
     return params
 
 
 def read_body_params_model():
-    return read_mean_cov('data/body_params.hdf5')
+    return read_gmm('data/body_params.hdf5')
 
 
 def generate_body_params(body_params_model):
-    return generate_params(*body_params_model)
+    return generate_params_gmm(*body_params_model)
 
 
 # Eyebrow color and underhair color will be set with hair color
@@ -596,7 +623,7 @@ def parse_body_params(card):
             out += param
         else:
             out.append(param)
-    out = np.array(out, dtype=float)
+    out = np.array(out, dtype=np.float64)
     return out
 
 
@@ -632,6 +659,7 @@ def dump_hair_ids(card, hair_ids):
         hair['id'] = hair_id
 
 
+# TODO: sailor and jacket id
 def parse_costume_ids(card):
     return [[part['id'] for part in coordinate[1][0]['parts']]
             for coordinate in card['coordinate']]
@@ -644,11 +672,11 @@ def dump_costume_ids(card, costume_ids):
 
 
 def read_costume_colors_model():
-    return read_mean_cov('data/costume_colors.hdf5')
+    return read_gmm('data/costume_colors.hdf5')
 
 
 def generate_costume_colors(costume_colors_model):
-    return [generate_params(*costume_colors_model) for i in range(7)]
+    return [generate_params_gmm(*costume_colors_model) for i in range(7)]
 
 
 # TODO: pattern
