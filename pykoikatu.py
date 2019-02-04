@@ -1,23 +1,24 @@
 # A chara card contains two pngs (cover, head) and chara data.
-# The chara data contains lstInfo and four lists (custom, coordinate, parameter, status).
+# The chara data contains lstInfo and four lists (custom, coordinate,
+#   parameter, status).
 # The custom list contains three lists (face, body, hair).
 # Each list contains several tokens. Data types of tokens are shown below.
 # The file structure is really awful... Why don't they use a common pickler?
 
 # TODO:
-# Generate random hair and eye
-# Generate random coordinates and floats
-# Better model of parameter space
+# Better parameter models
+# Generate random costume id and hair id
+# Generate random accessories
 
 import codecs
+import io
+import struct
+from collections import OrderedDict
+
 import h5py
 import hsluv
-import io
 import numpy as np
-import struct
 from PIL import Image, ImageDraw, ImageFont
-from collections import OrderedDict
-from pprint import pprint
 
 DEBUG = False
 
@@ -81,7 +82,7 @@ def parse_token(data, idx0):
         token_len = data[idx] - SIGN_STR
         try:
             token = data[idx + 1:idx + token_len + 1].decode()
-        except:
+        except UnicodeDecodeError:
             debug_print('STR', idx, data[idx:idx + token_len + 1])
             token = data[idx + 1:idx + token_len + 1]
         idx += token_len + 1
@@ -141,7 +142,7 @@ def parse_token(data, idx0):
         token_len = data[idx + 1]
         try:
             token = data[idx + 2:idx + token_len + 2].decode()
-        except:
+        except UnicodeDecodeError:
             debug_print('LONG_STR', idx, data[idx:idx + token_len + 2])
             token = data[idx + 2:idx + token_len + 2]
         idx += token_len + 2
@@ -395,10 +396,10 @@ def write_card(filename, card):
     if has_kkex:
         data_len += len(card['KKEx'])
 
-    with open(filename, 'wb') as g:
-        g.write(card['img1'])
+    with open(filename, 'wb') as f:
+        f.write(card['img1'])
 
-        g.write(b''.join([
+        f.write(b''.join([
             b'\x64\x00\x00\x00',
             b'\x12',
             '【KoiKatuChara】'.encode(),
@@ -406,23 +407,23 @@ def write_card(filename, card):
             '0.0.0'.encode(),
             struct.pack('<I', len(card['img2'])),
         ]))
-        g.write(card['img2'])
+        f.write(card['img2'])
 
-        g.write(card['unknown_data'])
+        f.write(card['unknown_data'])
 
-        g.write(lstinfo_data)
+        f.write(lstinfo_data)
 
-        g.write(struct.pack('<Q', data_len))
-        g.write(face_data)
-        g.write(body_data)
-        g.write(hair_data)
+        f.write(struct.pack('<Q', data_len))
+        f.write(face_data)
+        f.write(body_data)
+        f.write(hair_data)
 
-        g.write(coordinate_data)
-        g.write(parameter_data)
-        g.write(status_data)
+        f.write(coordinate_data)
+        f.write(parameter_data)
+        f.write(status_data)
 
         if has_kkex:
-            g.write(card['KKEx'])
+            f.write(card['KKEx'])
 
 
 def generate_img_text(width, height, bg_color, text, text_color):
@@ -467,67 +468,229 @@ def read_extern_img(filename):
     return img_data
 
 
-def read_face_body_data():
-    with h5py.File('data/face_body.hdf5', 'r') as f:
-        face_body_mean = np.array(f['mean'], dtype=float)
-        face_body_cov = np.array(f['cov'], dtype=float)
-    return face_body_mean, face_body_cov
+def read_mean_cov(filename):
+    with h5py.File(filename, 'r') as f:
+        mean = np.array(f['mean'], dtype=float)
+        cov = np.array(f['cov'], dtype=float)
+    return mean, cov
 
 
-# Sample face and body parameters from multivariate normal distribution
-def generate_face_body_params(face_body_mean, face_body_cov):
-    face_body_params = np.random.multivariate_normal(face_body_mean,
-                                                     face_body_cov)
-    face_body_params = np.clip(face_body_params, 0, 1)
-    return face_body_params
+def generate_params(mean, cov):
+    params = np.random.multivariate_normal(mean, cov)
+    params = np.clip(params, 0, 1)
+    params = params.tolist()
+    return params
 
 
-def parse_face_body_params(card):
-    return np.array(
-        card['face']['shapeValueFace'] + card['body']['shapeValueBody'] + [
-            card['body']['bustSoftness'], card['body']['bustWeight']
-        ] + card['body']['skinMainColor'] + card['body']['skinSubColor'] + [
-            card['body']['skinGlossPower']
-        ] + card['body']['nipColor'] + [card['body']['nipGlossPower']],
-        dtype=float)
+def read_body_params_model():
+    return read_mean_cov('data/body_params.hdf5')
 
 
-def dump_face_body_params(card, face_body_params):
-    card['face']['shapeValueFace'] = face_body_params[0:52].tolist()
-    card['body']['shapeValueBody'] = face_body_params[52:96].tolist()
-    card['body']['bustSoftness'] = float(face_body_params[96])
-    card['body']['bustWeight'] = float(face_body_params[97])
-    card['body']['skinMainColor'] = face_body_params[98:102].tolist()
-    card['body']['skinSubColor'] = face_body_params[102:106].tolist()
-    card['body']['skinGlossPower'] = float(face_body_params[106])
-    card['body']['nipColor'] = face_body_params[107:111].tolist()
-    card['body']['nipGlossPower'] = float(face_body_params[111])
+def generate_body_params(body_params_model):
+    return generate_params(*body_params_model)
+
+
+# Eyebrow color and underhair color will be set with hair color
+# Hair length, position, acsColor are not set yet
+body_config = [
+    'face.shapeValueFace',
+    'face.detailPower',
+    'face.cheekGlossPower',
+    'face.pupil.0.baseColor.0:3',
+    'face.pupil.0.subColor.0:3',
+    'face.pupil.0.gradBlend',
+    'face.pupil.0.gradOffsetY',
+    'face.pupil.0.gradScale',
+    'face.hlUpColor',
+    'face.hlDownColor',
+    'face.whiteBaseColor.0:3',
+    'face.whiteSubColor.0:3',
+    'face.pupilWidth',
+    'face.pupilHeight',
+    'face.pupilX',
+    'face.pupilY',
+    'face.eyelineUpWeight',
+    'face.eyelineColor.0:3',
+    'face.moleColor',
+    'face.moleLayout',
+    'face.lipLineColor',
+    'face.lipGlossPower',
+    'face.baseMakeup.eyeshadowColor',
+    'face.baseMakeup.cheekColor',
+    'face.baseMakeup.lipColor',
+    'face.baseMakeup.paintColor.0',
+    'face.baseMakeup.paintColor.1',
+    'face.baseMakeup.paintLayout.0',
+    'face.baseMakeup.paintLayout.1',
+    'body.shapeValueBody',
+    'body.bustSoftness',
+    'body.bustWeight',
+    'body.detailPower',
+    'body.skinMainColor.0:3',
+    'body.skinSubColor.0:3',
+    'body.skinGlossPower',
+    'body.paintColor.0',
+    'body.paintColor.1',
+    'body.paintLayout.0',
+    'body.paintLayout.1',
+    'body.sunburnColor',
+    'body.nipColor.0:3',
+    'body.nipGlossPower',
+    'body.areolaSize',
+    'body.nailColor.0:3',
+    'body.nailGlossPower',
+    'hair.parts.0.baseColor.0:3',
+    'hair.parts.0.startColor.0:3',
+    'hair.parts.0.endColor.0:3',
+    'hair.parts.0.outlineColor.0:3',
+    'hair.parts.1.baseColor.0:3',
+    'hair.parts.1.startColor.0:3',
+    'hair.parts.1.endColor.0:3',
+    'hair.parts.1.outlineColor.0:3',
+    'hair.parts.2.baseColor.0:3',
+    'hair.parts.2.startColor.0:3',
+    'hair.parts.2.endColor.0:3',
+    'hair.parts.2.outlineColor.0:3',
+    'hair.parts.3.baseColor.0:3',
+    'hair.parts.3.startColor.0:3',
+    'hair.parts.3.endColor.0:3',
+    'hair.parts.3.outlineColor.0:3',
+]
+
+
+def get_child(card, path):
+    child = card
+    keys = path.split('.')
+    for key in keys:
+        if key in '0123456789':
+            key = int(key)
+        elif ':' in key:
+            start, end = key.split(':')
+            key = slice(int(start), int(end))
+        child = child[key]
+    return child
+
+
+def set_child(card, path, value):
+    child = card
+    keys = path.split('.')
+    count = 0
+    for key in keys:
+        if key in '0123456789':
+            key = int(key)
+        elif ':' in key:
+            start, end = key.split(':')
+            key = slice(int(start), int(end))
+        count += 1
+        if count == len(keys):
+            child[key] = value
+        else:
+            child = child[key]
+
+
+def parse_body_params(card):
+    out = []
+    for path in body_config:
+        param = get_child(card, path)
+        if type(param) == list:
+            out += param
+        else:
+            out.append(param)
+    out = np.array(out, dtype=float)
+    return out
+
+
+def dump_body_params(card,
+                     body_params,
+                     copy_pupil=False,
+                     copy_hair_color=False):
+    idx = 0
+    for path in body_config:
+        param = get_child(card, path)
+        if type(param) == list:
+            delta_idx = len(param)
+            set_child(card, path, body_params[idx:idx + delta_idx])
+            idx += delta_idx
+        else:
+            set_child(card, path, float(body_params[idx]))
+            idx += 1
+    assert idx == len(body_params)
+    if copy_pupil:
+        card['face']['pupil'][1] = card['face']['pupil'][0]
+    if copy_hair_color:
+        hair_color = card['hair']['parts'][0]['baseColor']
+        card['face']['eyebrowColor'] = hair_color
+        card['body']['underhairColor'] = hair_color
+
+
+def parse_hair_ids(card):
+    return [hair['id'] for hair in card['hair']['parts']]
+
+
+def dump_hair_ids(card, hair_ids):
+    for hair, hair_id in zip(card['hair']['parts'], hair_ids):
+        hair['id'] = hair_id
+
+
+def parse_costume_ids(card):
+    return [[part['id'] for part in coordinate[1][0]['parts']]
+            for coordinate in card['coordinate']]
+
+
+def dump_costume_ids(card, costume_ids):
+    for coordinate, part_ids in zip(card['coordinate'], costume_ids):
+        for part, part_id in zip(coordinate[1][0]['parts'], part_ids):
+            part['id'] = part_id
+
+
+def read_costume_colors_model():
+    return read_mean_cov('data/costume_colors.hdf5')
+
+
+def generate_costume_colors(costume_colors_model):
+    return [generate_params(*costume_colors_model) for i in range(7)]
+
+
+# TODO: pattern
+def parse_costume_colors(card):
+    return [
+        sum([
+            color['baseColor'][:3] for part in coordinate[1][0]['parts']
+            for color in part['colorInfo']
+        ], []) for coordinate in card['coordinate']
+    ]
+
+
+def dump_costume_colors(card, costume_colors):
+    for coordinate, part_colors in zip(card['coordinate'], costume_colors):
+        for part_idx, part in enumerate(coordinate[1][0]['parts']):
+            for color_idx, color in enumerate(part['colorInfo']):
+                idx = (part_idx * 4 + color_idx) * 3
+                color['baseColor'][:3] = part_colors[idx:idx + 3]
 
 
 def read_name_data():
     with codecs.open('data/last_name.txt', 'r', 'utf-8') as f:
-        last_name_list = [line.strip() for line in f]
+        last_names = [line.strip() for line in f]
     with codecs.open('data/male_name.txt', 'r', 'utf-8') as f:
-        male_name_list = [line.strip() for line in f]
+        male_names = [line.strip() for line in f]
     with codecs.open('data/female_name.txt', 'r', 'utf-8') as f:
-        female_name_list = [line.strip() for line in f]
-    return last_name_list, male_name_list, female_name_list
+        female_names = [line.strip() for line in f]
+    return last_names, male_names, female_names
 
 
 GENDER_MALE = 0
 GENDER_FEMALE = 1
 
 
-def generate_name(last_name_list,
-                  male_name_list,
-                  female_name_list,
-                  gender=GENDER_FEMALE):
-    last_name = np.random.choice(last_name_list)
+def generate_name(last_names, male_names, female_names, gender=GENDER_FEMALE):
+    # Convert np.str to builtin str
+    last_name = str(np.random.choice(last_names))
 
     if gender == GENDER_MALE:
-        first_name = np.random.choice(male_name_list)
+        first_name = str(np.random.choice(male_names))
     elif gender == GENDER_FEMALE:
-        first_name = np.random.choice(female_name_list)
+        first_name = str(np.random.choice(female_names))
     else:
         raise Exception('Unknown gender: {}'.format(gender))
     hiragana, first_name = first_name.split()
@@ -547,11 +710,10 @@ def generate_name(last_name_list,
         else:  # choice == 4
             nickname = hiragana
 
-    suffix = np.random.choice(['ちゃん', 'たん', 'りん', 'じん'])
+    suffix = str(np.random.choice(['ちゃん', 'たん', 'りん', 'じん']))
     nickname += suffix
 
-    # np.str to builtin str
-    return str(last_name), str(first_name), str(nickname)
+    return last_name, first_name, nickname
 
 
 def parse_name(card):
