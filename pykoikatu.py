@@ -7,13 +7,14 @@
 
 # TODO:
 # Better parameter models
-# Generate random costume id and hair id
+# Generate costume for each type
 # Generate random accessories
 
 import codecs
 import io
 import struct
 from collections import OrderedDict
+from functools import lru_cache
 
 import h5py
 import hsluv
@@ -21,6 +22,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from scipy.special import ndtr
 from sklearn.mixture import GaussianMixture
+
+from trdm import TensorRankDecompositionModel
 
 DEBUG = False
 
@@ -481,7 +484,8 @@ def generate_params_mean_cov(mean, cov, use_cdf=False):
     params = np.random.multivariate_normal(mean, cov)
     if use_cdf:
         params = ndtr(params)
-    params = np.clip(params, 0, 1)
+    else:
+        params = np.clip(params, 0, 1)
     params = params.tolist()
     return params
 
@@ -504,17 +508,39 @@ def generate_params_gmm(weight, mean, cov, use_cdf=False):
     params = gmm.sample()[0][0]
     if use_cdf:
         params = ndtr(params)
-    params = np.clip(params, 0, 1)
+    else:
+        params = np.clip(params, 0, 1)
     params = params.tolist()
     return params
 
 
+def read_trdm(filename, shape):
+    with h5py.File(filename, 'r') as f:
+        weight = np.array(f['weight'], dtype=np.float64)
+        us = [
+            np.array(f['u{}'.format(i)], dtype=np.float64)
+            for i in range(len(shape))
+        ]
+    return shape, weight, us
+
+
+def generate_params_trdm(shape, weight, us):
+    trdm = TensorRankDecompositionModel(shape=shape, n_components=weight.size)
+    trdm.w = weight
+    trdm.us = us
+    params = trdm.sample()[0][0]
+    params = params.tolist()
+    return params
+
+
+@lru_cache(maxsize=None)
 def read_body_params_model():
+    print('read_body_params_model')
     return read_gmm('data/body_params.hdf5')
 
 
-def generate_body_params(body_params_model):
-    return generate_params_gmm(*body_params_model)
+def generate_body_params():
+    return generate_params_gmm(*read_body_params_model())
 
 
 # Eyebrow color and underhair color will be set with hair color
@@ -623,7 +649,6 @@ def parse_body_params(card):
             out += param
         else:
             out.append(param)
-    out = np.array(out, dtype=np.float64)
     return out
 
 
@@ -650,6 +675,40 @@ def dump_body_params(card,
         card['body']['underhairColor'] = hair_color
 
 
+hair_part_names = ('hair_b', 'hair_f', 'hair_s', 'hair_o')
+
+
+def read_item_ids(filename):
+    item_ids = []
+    with open(filename, 'r', encoding='utf-8') as f:
+        for row in f:
+            item_ids.append(int(row.split()[0]))
+    return item_ids
+
+
+@lru_cache(maxsize=None)
+def read_max_parts_id(prefix, part_names):
+    print('read_max_parts_id', prefix)
+    parts_ids = {
+        part_name: read_item_ids('item_lists/{}_{}.txt'.format(
+            prefix, part_name))
+        for part_name in set(part_names)
+    }
+    max_parts_id = [max(parts_ids[part_name]) + 1 for part_name in part_names]
+    return max_parts_id
+
+
+@lru_cache(maxsize=None)
+def read_hair_ids_model():
+    print('read_hair_ids_model')
+    return read_trdm('data/hair_ids.hdf5',
+                     read_max_parts_id('bo', hair_part_names))
+
+
+def generate_hair_ids():
+    return generate_params_trdm(*read_hair_ids_model())
+
+
 def parse_hair_ids(card):
     return [hair['id'] for hair in card['hair']['parts']]
 
@@ -657,6 +716,21 @@ def parse_hair_ids(card):
 def dump_hair_ids(card, hair_ids):
     for hair, hair_id in zip(card['hair']['parts'], hair_ids):
         hair['id'] = hair_id
+
+
+costume_part_names = ('top', 'bot', 'bra', 'shorts', 'gloves', 'panst',
+                      'socks', 'shoes', 'shoes')
+
+
+@lru_cache(maxsize=None)
+def read_costume_ids_model():
+    print('read_costume_ids_model')
+    return read_trdm('data/costume_ids.hdf5',
+                     read_max_parts_id('co', costume_part_names))
+
+
+def generate_costume_ids():
+    return [generate_params_trdm(*read_costume_ids_model()) for i in range(7)]
 
 
 # TODO: sailor and jacket id
@@ -671,12 +745,16 @@ def dump_costume_ids(card, costume_ids):
             part['id'] = part_id
 
 
+@lru_cache(maxsize=None)
 def read_costume_colors_model():
+    print('read_costume_colors_model')
     return read_gmm('data/costume_colors.hdf5')
 
 
-def generate_costume_colors(costume_colors_model):
-    return [generate_params_gmm(*costume_colors_model) for i in range(7)]
+def generate_costume_colors():
+    return [
+        generate_params_gmm(*read_costume_colors_model()) for i in range(7)
+    ]
 
 
 # TODO: pattern
@@ -697,7 +775,9 @@ def dump_costume_colors(card, costume_colors):
                 color['baseColor'][:3] = part_colors[idx:idx + 3]
 
 
+@lru_cache(maxsize=None)
 def read_name_data():
+    print('read_name_data')
     with codecs.open('data/last_name.txt', 'r', 'utf-8') as f:
         last_names = [line.strip() for line in f]
     with codecs.open('data/male_name.txt', 'r', 'utf-8') as f:
@@ -711,7 +791,9 @@ GENDER_MALE = 0
 GENDER_FEMALE = 1
 
 
-def generate_name(last_names, male_names, female_names, gender=GENDER_FEMALE):
+def generate_name(gender=GENDER_FEMALE):
+    last_names, male_names, female_names = read_name_data()
+
     # Convert np.str to builtin str
     last_name = str(np.random.choice(last_names))
 
